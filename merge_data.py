@@ -20,7 +20,7 @@ def load_npz_data(eeg_dir, eye_dir, file_name, cv_number):
     print("size of labels: ", len(labels))
 
     # there will be thousands of samples for each emotion
-    all_data = np.hstack((eeg_data, eye_data, labels.reshape([-1,1])))
+    all_data = np.float32(np.hstack((eeg_data, eye_data, labels.reshape([-1,1]))))
 
     return all_data
 
