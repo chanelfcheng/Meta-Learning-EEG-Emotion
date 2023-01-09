@@ -3,7 +3,6 @@
 
 # %%
 ## Standard libraries
-import sys
 import os
 import numpy as np
 import random
@@ -65,125 +64,143 @@ CHECKPOINT_PATH = "saved_models/seed-v"
 
 # %%
 class SEEDV(data.Dataset):
-    def __init__(self, emotion_dict, num_participants, data_dir):
+    def __init__(self, emotion_dict: dict, num_subjects: int, data_path: str):
+        """constructor for SEEDV dataset
+
+        Args:
+            emotion_dict (dict): dictionary of emotion_num as key and
+            emotion_str as value
+            num_subjects (int): number of subjects in the dataset
+            data_path (str): path to the directory containing npy data files
+        """
         self.emotion_dict = emotion_dict
-        self.num_participants = num_participants
-        self.data_dir = data_dir
+        self.num_subjects = num_subjects
+        self.data_path = data_path
         self.tensor_dataset = self.load_data()
-    
+
     def load_data(self):
-        dataset = None           
-        for file in os.listdir(self.data_dir):
-            file_path = os.path.join(self.data_dir, file)
+        """load data from npy files to create tensor dataset
+
+        Returns:
+            data.TensorDataset: tensor dataset containing 
+                all data from all npy files
+        """
+        # initialize dataset and subjects to None at start
+        dataset = None
+        subjects = None
+
+        # loop through all files in the directory
+        for file in os.listdir(self.data_path):
+            # get the file path of the file
+            file_path = os.path.join(self.data_path, file)
+
+            # get subject number from the filename
+            s_num = np.int64(re.findall("\d+", file)[0]) - 1
+
+            # if dataset has not been created yet
             if dataset is None:
-                target = np.int64(re.findall("\d+", file)[0])
-                for i in range(1, len(np.load(file_path))):
-                    target = np.hstack((target, int(re.findall("\d+", file)[0])))
+                # create subject meta labels for each sample in dataset
+                for i in range(len(np.load(file_path))):
+                    if subjects is None:
+                        subjects = s_num
+                    else:
+                        # need to hstack subjects to match tensor shapes of emotion
+                        subjects = np.hstack((subjects, s_num))
+                # load the data from the npy file
                 dataset = np.load(file_path)
+            # else if dataset already exists
             else:
                 for i in range(len(np.load(file_path))):
-                    target = np.hstack((target, np.int64(re.findall("\d+", file)[0])))
+                    # hstack subjects to match tensor shapes of emotion
+                    subjects = np.hstack((subjects, s_num))
+                # stack the data vertically
                 dataset = np.vstack((dataset, np.load(file_path)))
 
-        tensor_dataset = data.TensorDataset(torch.from_numpy(dataset[:, :-1]), torch.from_numpy(dataset[:, -1]), torch.from_numpy(target))
-                    
+        # create tensor dataset with subject meta labels, features, and emotion labels
+        tensor_dataset = data.TensorDataset(torch.from_numpy(
+            subjects), torch.from_numpy(dataset[:, :-1]), torch.from_numpy(dataset[:, -1]))
+
         return tensor_dataset
-    
-    def get_all_data(self):
-        """
-        same as self.__getitem__(self, idx) but instead of a specific index
-        this function will return all the tuple that contains all features and 
-        combined labels 
+
+    def get_subjects_data(self, s_nums: list):
+        """get data for only subjects in s_nums
+
+        Args:
+            s_nums (list): list of subject numbers that identifies subjects
+
+        Returns:
+            tuple of torch.tensor: all features and all emotion numbers for only
+            specified subjects
         """
         all_features = None
-        all_combined_labels = None
+        all_emotions = None
 
-        for idx in range(len(self.tensor_dataset)):
+        for s_num in s_nums:
             if all_features == None:
-                all_features, all_combined_labels = self.__getitem__(idx)
+                all_features, all_emotions = self.__getitem__(s_num)
             else:
-                features, combined_labels = self.__getitem__(idx)
+                features, targets = self.__getitem__(s_num)
                 all_features = torch.vstack((all_features, features))
-                all_combined_labels = torch.vstack((all_combined_labels, combined_labels))
-        
-        return all_features, all_combined_labels
+                all_emotions = torch.vstack((all_emotions, targets))
+
+        return all_features, all_emotions.reshape((1,-1))[0]
 
     def __len__(self):
+        """get number of samples in dataset
+
+        Returns:
+            int: number of samples in dataset
+        """
         return len(self.tensor_dataset)
-        
-    def __getitem__(self, idx):
-        """
-        return a tuple of features, combined_label (from participant and emotion)
-        p1: 0 1 2 3 4,
-        p2: 5 6 7 8 9,
-        ...
-        p16: 75 76 77 78 79
 
-        we are only given participant # and emotion #
-        p1_0: 0 = (1 - 1) * 5
-        p1_1: 1 = 0 + 1
-        p1_2: 2 = 0 + 2
-        p1_3: 3 = 0 + 3
-        p1_4: 4 = 0 + 4
-        p2_0: 5 = (2 - 1) * 5
-        p2_1: 6 = 5 + 1
-        p2_2: 7 = 5 + 2
-        p2_3: 8 = 5 + 3
-        p2_4: 9 = 5 + 4
-        ..
-        p16_0: 75 = (16 - 1) * 5 = 75
-        ...
-        """
-        features = self.tensor_dataset[idx][0]
-        emotion_num = self.tensor_dataset[idx][1]
-        participant_num = self.tensor_dataset[idx][2]
-        base = (participant_num - 1) * len(self.emotion_dict)
-        combined_label = base + emotion_num
+    def __getitem__(self, s_num: int):
+        """get data for a given s_num
 
-        return features, combined_label.to(torch.int64)
+        Args:
+            s_num (int): number that identifies a subject
+
+        Returns:
+            tuple of torch.tensor: features and corresponding emotion numbers
+        """
+        indices = torch.where(self.tensor_dataset[:][0] == s_num, True, False)
+        features = self.tensor_dataset[indices][1]
+        emotion_num = self.tensor_dataset[indices][2]
+
+        return features, emotion_num.to(torch.int64).reshape((1,-1))[0]
+
 
 # %%
-seed_v = SEEDV(emotion_dict = {0: 'disgust', 1: 'fear', 2: 'sad', 3: 'neutral', 4: 'happy'}, num_participants=16, data_dir=DATASET_PATH)
+seed_v = SEEDV(emotion_dict = {0: 'disgust', 1: 'fear', 2: 'sad', 3: 'neutral', 4: 'happy'}, num_subjects=16, data_path=DATASET_PATH)
 
 # %% [markdown]
 # # Perform a train-val-test split by label
 
 # %%
-classes = torch.randperm(5*16) # Generate random permutation of numbers from 0 to 79
-train_classes, val_classes, test_classes = classes[:64], classes[64:72], classes[72:] # 80-10-10 split
-
-# %%
-SEEDV_all_features, SEEDV_all_labels = seed_v.get_all_data()
+metaclasses = torch.randperm(16) # random permutation of subjects 0 to 15 which are the metaclasses
+train_metaclasses, val_metaclasses, test_metaclasses = metaclasses[0:12], metaclasses[12:14], metaclasses[14:16]
 
 # %%
 class EEGDataset(data.Dataset):
-    def __init__(self, features, labels):
+    def __init__(self, features, targets):
+        """constructor for EEGDataset"""
         super().__init__()
         self.features = features
-        self.labels = labels
+        self.targets = targets
 
     def __getitem__(self, idx):
-        features, labels = self.features[idx], self.labels[idx]
+        """get item by index"""
+        features, targets = self.features[idx], self.targets[idx]
 
-        return features, labels
+        return features, targets
 
     def __len__(self):
+        """get number of samples in dataset"""
         return self.features.shape[0]
 
 # %%
-def dataset_from_labels(features, labels, class_set): 
-    # for label in labels:
-    #     print(label)
-    class_mask = (labels[:,None] == class_set[None,:]).any(dim=-1) # reshape class mask [[64], [64],... ] -> [64, 64, ...]
-    return EEGDataset(features[class_mask], labels[class_mask]) # reshape labels [[0], [1], ...] -> [0, 1, ...]
-
-# %%
-train_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_labels.reshape((1,-1))[0], train_classes)
-val_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_labels.reshape((1,-1))[0], val_classes)
-test_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_labels.reshape((1,-1))[0], test_classes)
+train_set = EEGDataset(*seed_v.get_subjects_data(train_metaclasses))
+val_set = EEGDataset(*seed_v.get_subjects_data(val_metaclasses))
+test_set = EEGDataset(*seed_v.get_subjects_data(test_metaclasses))
 
 # %% [markdown]
 # # Setup dataloaders and samplers
@@ -225,17 +242,16 @@ class FewShotBatchSampler(object):
         for c in self.classes:
             self.indices_per_class[c] = torch.where(self.dataset_targets == c)[0]
             self.batches_per_class[c] = self.indices_per_class[c].shape[0] // self.K_shot
-
         # Create a list of classes from which we select the N classes per batch
         self.iterations = sum(self.batches_per_class.values()) // self.N_way
-        self.class_list = [c for c in self.classes for _ in range(self.batches_per_class[c])]
+        # self.class_list = [c for c in self.classes for _ in range(self.batches_per_class[c])]
         if shuffle_once or self.shuffle:
             self.shuffle_data()
         else:
             # For testing, we iterate over classes instead of shuffling them
             sort_idxs = [i+p*self.num_classes for i,
                          c in enumerate(self.classes) for p in range(self.batches_per_class[c])]
-            self.class_list = np.array(self.class_list)[np.argsort(sort_idxs)].tolist()
+            # self.class_list = np.array(self.class_list)[np.argsort(sort_idxs)].tolist()
 
     def shuffle_data(self):
         # Shuffle the examples per class
@@ -245,7 +261,7 @@ class FewShotBatchSampler(object):
         # Shuffle the class list from which we sample. Note that this way of shuffling
         # does not prevent to choose the same class twice in a batch. However, for 
         # training and validation, this is not a problem.
-        random.shuffle(self.class_list)
+        # random.shuffle(self.class_list)
 
     def __iter__(self):
         # Shuffle data
@@ -255,13 +271,25 @@ class FewShotBatchSampler(object):
         # Sample few-shot batches
         start_index = defaultdict(int)
         for it in range(self.iterations):
-            class_batch = self.class_list[it*self.N_way:(it+1)*self.N_way]  # Select N classes for the batch
+            # class_batch = self.class_list[it*self.N_way:(it+1)*self.N_way]  #
+            # Select N classes for the batch
+            class_batch = random.sample(self.classes, self.N_way)
             index_batch = []
             for c in class_batch:  # For each class, select the next K examples and add them to the batch
+                if len(index_batch) > 0 and max(index_batch) >= 21876:
+                    print("INDEX OUT OF BOUNDS")
                 index_batch.extend(self.indices_per_class[c][start_index[c]:start_index[c]+self.K_shot])
+                if len(index_batch) > 0 and max(index_batch) >= 21876:
+                    print("INDEX OUT OF BOUNDS")
                 start_index[c] += self.K_shot
+                try:
+                    self.indices_per_class[c][start_index[c]]
+                except:
+                    start_index[c] = 0
             if self.include_query:  # If we return support+query set, sort them so that they are easy to split
                 index_batch = index_batch[::2] + index_batch[1::2]
+            if max(index_batch) >= 21876:
+                print("INDEX OUT OF BOUNDS")
             yield index_batch
 
     def __len__(self):
@@ -269,16 +297,16 @@ class FewShotBatchSampler(object):
 
 # %%
 N_WAY = 5
-K_SHOT = 4
+K_SHOT = 10
 train_data_loader = data.DataLoader(train_set,
-                                    batch_sampler=FewShotBatchSampler(train_set.labels,
+                                    batch_sampler=FewShotBatchSampler(train_set.targets,
                                                                       include_query=True,
                                                                       N_way=N_WAY,
                                                                       K_shot=K_SHOT,
                                                                       shuffle=True),
                                     num_workers=32)
 val_data_loader = data.DataLoader(val_set,
-                                  batch_sampler=FewShotBatchSampler(val_set.labels,
+                                  batch_sampler=FewShotBatchSampler(val_set.targets,
                                                                     include_query=True,
                                                                     N_way=N_WAY,
                                                                     K_shot=K_SHOT,
@@ -290,25 +318,14 @@ val_data_loader = data.DataLoader(val_set,
 # # Split batch into query and support
 
 # %%
-def split_query_support(features, labels):
+def split_query_support(features, targets):
     support_features, query_features = features.chunk(2, dim=0)
-    support_labels, query_labels = labels.chunk(2, dim=0)
-    return support_features, query_features, support_labels, query_labels
+    support_targets, query_targets = targets.chunk(2, dim=0)
+    return support_features, query_features, support_targets, query_targets
 
 # %%
-features, labels = next(iter(val_data_loader))
-support_features, query_features, support_labels, query_labels = split_query_support(features, labels)
-
-# fig, ax = plt.subplots(1, 2, figsize=(8, 5))
-# ax[0].plot(support_features, 'o')
-# ax[0].set_title("Support set")
-# ax[0].axis('off')
-# ax[1].plot(query_features, 'o')
-# ax[1].set_title("Query set")
-# ax[1].axis('off')
-# plt.suptitle("Few Shot Batch", weight='bold')
-# plt.show()
-# plt.close()
+features, targets = next(iter(val_data_loader))
+support_features, query_features, support_targets, query_targets = split_query_support(features, targets)
 
 # %% [markdown]
 # # Normalize and visualize the features in batch
@@ -326,10 +343,10 @@ support_pca = pca.fit_transform(support_features)
 query_pca = pca.fit_transform(query_features)
 
 fig, ax = plt.subplots(1, 2, figsize=(8, 5))
-ax[0].scatter(support_pca[:,0], support_pca[:,1], c=support_labels)
+ax[0].scatter(support_pca[:,0], support_pca[:,1], c=support_targets.reshape((-1,1)))
 ax[0].set_title("Support set")
 ax[0].axis('off')
-ax[1].scatter(query_pca[:,0], query_pca[:,1], c=query_labels)
+ax[1].scatter(query_pca[:,0], query_pca[:,1], c=query_targets.reshape((-1,1)))
 ax[1].set_title("Query set")
 ax[1].axis('off')
 plt.suptitle("Few Shot Batch", weight='bold')
@@ -350,8 +367,6 @@ def cca_metric_derivative(H1, H2):
     # transform the matrix: to be consistent with the original paper
     H1 = H1.T
     H2 = H2.T
-    # if np.isnan(H2).all():
-    #     print("H2 is nan")
     # o1 and o2 are feature dimensions
     # m is sample number
     o1 = o2 = H1.shape[0]
@@ -400,67 +415,6 @@ def cca_metric_derivative(H1, H2):
 
     return cca_loss, DerivativeH1.T, DerivativeH2.T
 
-class cca_loss():
-    def __init__(self, outdim_size, use_all_singular_values, device):
-        self.outdim_size = outdim_size
-        self.use_all_singular_values = use_all_singular_values
-        self.device = device
-
-    def loss(self, H1, H2):
-        r1 = 1e-3
-        r2 = 1e-3
-        eps = 1e-9
-
-        H1, H2 = H1.t(), H2.t()
-        o1 = o2 = H1.size(0)
-
-        m = H1.size(1)
-
-        H1bar = H1 - H1.mean(dim=1).unsqueeze(dim=1)
-        H2bar = H2 - H2.mean(dim=1).unsqueeze(dim=1)
-
-        SigmaHat12 = (1.0 / (m - 1)) * torch.matmul(H1bar, H2bar.t())
-        SigmaHat11 = (1.0 / (m - 1)) * torch.matmul(H1bar,
-                                                    H1bar.t()) + r1 * torch.eye(o1, device=self.device)
-        SigmaHat22 = (1.0 / (m - 1)) * torch.matmul(H2bar,
-                                                    H2bar.t()) + r2 * torch.eye(o2, device=self.device)
-
-        # Calculating the root inverse of covariance matrices by using eigen decomposition
-        breakpoint()
-        [D1, V1] = torch.symeig(SigmaHat11, eigenvectors=True)
-        [D2, V2] = torch.symeig(SigmaHat22, eigenvectors=True)
-
-        # Added to increase stability
-        posInd1 = torch.gt(D1, eps).nonzero()[:, 0]
-        D1 = D1[posInd1]
-        V1 = V1[:, posInd1]
-        posInd2 = torch.gt(D2, eps).nonzero()[:, 0]
-        D2 = D2[posInd2]
-        V2 = V2[:, posInd2]
-
-        SigmaHat11RootInv = torch.matmul(
-            torch.matmul(V1, torch.diag(D1 ** -0.5)), V1.t())
-        SigmaHat22RootInv = torch.matmul(
-            torch.matmul(V2, torch.diag(D2 ** -0.5)), V2.t())
-
-        Tval = torch.matmul(torch.matmul(SigmaHat11RootInv,
-                                         SigmaHat12), SigmaHat22RootInv)
-
-        if self.use_all_singular_values:
-            # all singular values are used to calculate the correlation
-            tmp = torch.matmul(Tval.t(), Tval)
-            corr = torch.trace(torch.sqrt(tmp))
-            # assert torch.isnan(corr).item() == 0
-        else:
-            # just the top self.outdim_size singular values are used
-            trace_TT = torch.matmul(Tval.t(), Tval)
-            trace_TT = torch.add(trace_TT, (torch.eye(trace_TT.shape[0])*r1).to(self.device)) # regularization for more stability
-            U, V = torch.symeig(trace_TT, eigenvectors=True)
-            U = torch.where(U>eps, U, (torch.ones(U.shape)*eps).to(self.device))
-            U = U.topk(self.outdim_size)[0]
-            corr = torch.sum(torch.sqrt(U))
-        return -corr
-
 # %% [markdown]
 # ## Define DCCA network layers
 
@@ -486,10 +440,7 @@ class TransformLayers(nn.Module):
 
     def forward(self, x):
         for layer in self.layers:
-            # prev_x = x # for debug purpose, remove later
             x = layer(x)
-            # if torch.isnan(x).any():
-            #     print("NaN detected in layer")
         return x
 
 class AttentionFusion(nn.Module):
@@ -599,9 +550,9 @@ class ProtoNet(pl.LightningModule):
 
     def calculate_loss(self, batch, mode):
         # Determine training loss for a given support and query set 
-        imgs, targets = batch
-        features = self.model(imgs)  # Encode all images of support and query set
-        support_feats, query_feats, support_targets, query_targets = split_query_support(features, targets)
+        features, targets = batch
+        outputs = self.model(features)  # Encode all images of support and query set
+        support_feats, query_feats, support_targets, query_targets = split_query_support(outputs, targets)
         prototypes, classes = ProtoNet.calculate_prototypes(support_feats, support_targets)
         preds, labels, acc = self.classify_feats(prototypes, classes, query_feats, query_targets)
         loss = F.cross_entropy(preds, labels)
@@ -627,7 +578,7 @@ class ProtoMAML(pl.LightningModule):
         Inputs
             eeg_input_dim - Dimensionality of prototype feature space
             lr - Learning rate of the outer loop Adam optimizer
-            lr_inner - Learning rate of the inner loop SGD optimizer
+            lr_inner - Learning rate of th``e inner loop SGD optimizer
             lr_output - Learning rate for the output layer in the inner loop
             num_inner_steps - Number of inner loop updates to perform
         """
@@ -644,19 +595,21 @@ class ProtoMAML(pl.LightningModule):
         
     def run_model(self, local_model, output_weight, output_bias, features, labels):
         # Execute a model with given output layer weights and inputs
-        out = local_model(features)
+        dcca_out = local_model(features)
+        out = dcca_out[0]
+        cca_loss = dcca_out[1]
         # get only first element of tuple in feats
-        preds = F.linear(out[0], output_weight, output_bias)
+        preds = F.linear(out, output_weight, output_bias)
         # loss = F.cross_entropy(preds, labels.reshape((-1,1))[0]) 
         # already RESHAPED EARLIER in dataset_from_labels calls
-        loss = F.cross_entropy(preds, labels)
+        loss = 0.7 * cca_loss + 1.0 * F.cross_entropy(preds, labels)
         acc = (preds.argmax(dim=1) == labels).float()
         return loss, preds, acc
         
-    def adapt_few_shot(self, support_imgs, support_targets):
+    def adapt_few_shot(self, support_features, support_targets):
         # Determine prototype initialization
-        support_feats = self.model(support_imgs)
-        prototypes, classes = ProtoNet.calculate_prototypes(support_feats, support_targets)
+        support_preds = self.model(support_features)
+        prototypes, classes = ProtoNet.calculate_prototypes(support_preds, support_targets)
         support_labels = (classes[None,:] == support_targets[:,None]).long().argmax(dim=-1)
         # Create inner-loop model and optimizer
         local_model = deepcopy(self.model)
@@ -672,7 +625,8 @@ class ProtoMAML(pl.LightningModule):
         # Optimize inner loop model on support set
         for _ in range(self.hparams.num_inner_steps):
             # Determine loss on the support set
-            loss, _, _ = self.run_model(local_model, output_weight, output_bias, support_imgs, support_labels)
+            # print(support_labels)
+            loss, _, _ = self.run_model(local_model, output_weight, output_bias, support_features, support_labels)
             # Calculate gradients and perform inner loop update
             loss.backward()
             local_optim.step()
@@ -697,13 +651,14 @@ class ProtoMAML(pl.LightningModule):
         
         # Determine gradients for batch of tasks
         for task_batch in batch:
-            imgs, targets = task_batch
-            support_imgs, query_imgs, support_targets, query_targets = split_query_support(imgs, targets)
+            features, targets = task_batch
+            support_features, query_features, support_targets, query_targets = split_query_support(features, targets)
             # Perform inner loop adaptation
-            local_model, output_weight, output_bias, classes = self.adapt_few_shot(support_imgs, support_targets)
+            # print(support_targets)
+            local_model, output_weight, output_bias, classes = self.adapt_few_shot(support_features, support_targets)
             # Determine loss of query set
             query_labels = (classes[None,:] == query_targets[:,None]).long().argmax(dim=-1)
-            loss, preds, acc = self.run_model(local_model, output_weight, output_bias, query_imgs, query_labels)
+            loss, preds, acc = self.run_model(local_model, output_weight, output_bias, query_features, query_labels)
             # Calculate gradients for query set loss
             if mode == "train":
                 loss.backward()
@@ -773,11 +728,11 @@ class TaskBatchSampler(object):
     def get_collate_fn(self):
         # Returns a collate function that converts one big tensor into a list of task-specific tensors
         def collate_fn(item_list):
-            imgs = torch.stack([img for img, target in item_list], dim=0)
-            targets = torch.stack([target for img, target in item_list], dim=0)
-            imgs = imgs.chunk(self.task_batch_size, dim=0)
+            features = torch.stack([feat for feat, target in item_list], dim=0)
+            targets = torch.stack([target for feat, target in item_list], dim=0)
+            features = features.chunk(self.task_batch_size, dim=0)
             targets = targets.chunk(self.task_batch_size, dim=0)
-            return list(zip(imgs, targets))
+            return list(zip(features, targets))
         return collate_fn
 
 # %% [markdown]
@@ -814,8 +769,8 @@ def train_model(model_class, train_loader, val_loader, **kwargs):
 def test_protomaml(model, dataset, k_shot=4):
     pl.seed_everything(42)
     model = model.to(device)
-    num_classes = dataset.labels.unique().shape[0]
-    exmps_per_class = dataset.labels.shape[0]//num_classes
+    num_classes = dataset.targets.unique().shape[0]
+    exmps_per_class = dataset.targets.shape[0]//num_classes
     
     # Data loader for full test set as query set
     full_dataloader = data.DataLoader(dataset, 
@@ -824,7 +779,7 @@ def test_protomaml(model, dataset, k_shot=4):
                                       shuffle=False, 
                                       drop_last=False)
     # Data loader for sampling support sets
-    sampler = FewShotBatchSampler(dataset.labels, 
+    sampler = FewShotBatchSampler(dataset.targets, 
                                   include_query=False,
                                   N_way=num_classes,
                                   K_shot=k_shot,
@@ -837,21 +792,21 @@ def test_protomaml(model, dataset, k_shot=4):
     # We iterate through the full dataset in two manners. First, to select the k-shot batch. 
     # Second, the evaluate the model on all other examples
     accuracies = []
-    for (support_imgs, support_targets), support_indices in tqdm(zip(sample_dataloader, sampler), "Performing few-shot finetuning"):
-        support_imgs = support_imgs.to(device)
+    for (support_features, support_targets), support_indices in tqdm(zip(sample_dataloader, sampler), "Performing few-shot finetuning"):
+        support_features = support_features.to(device)
         support_targets = support_targets.to(device)
-        # Finetune new model on support set
         try:
-            local_model, output_weight, output_bias, classes = model.adapt_few_shot(support_imgs, support_targets)
+            # Finetune new model on support set
+            local_model, output_weight, output_bias, classes = model.adapt_few_shot(support_features, support_targets)
             with torch.no_grad():  # No gradients for query set needed
                 local_model.eval()
                 batch_acc = torch.zeros((0,), dtype=torch.float32, device=device)
                 # Evaluate all examples in test dataset
-                for query_imgs, query_targets in full_dataloader:
-                    query_imgs = query_imgs.to(device)
+                for query_features, query_targets in full_dataloader:
+                    query_features = query_features.to(device)
                     query_targets = query_targets.to(device)
                     query_labels = (classes[None,:] == query_targets[:,None]).long().argmax(dim=-1)
-                    _, _, acc = model.run_model(local_model, output_weight, output_bias, query_imgs, query_labels)
+                    _, _, acc = model.run_model(local_model, output_weight, output_bias, query_features, query_labels)
                     batch_acc = torch.cat([batch_acc, acc.detach()], dim=0)
                 # Exclude support set elements
                 for s_idx in support_indices:
@@ -871,7 +826,7 @@ N_WAY = 5
 K_SHOT = 10
 
 # Training set
-train_protomaml_sampler = TaskBatchSampler(train_set.labels, 
+train_protomaml_sampler = TaskBatchSampler(train_set.targets, 
                                            include_query=True,
                                            N_way=N_WAY,
                                            K_shot=K_SHOT,
@@ -882,7 +837,7 @@ train_protomaml_loader = data.DataLoader(train_set,
                                          num_workers=32)
 
 # Validation set
-val_protomaml_sampler = TaskBatchSampler(val_set.labels, 
+val_protomaml_sampler = TaskBatchSampler(val_set.targets, 
                                          include_query=True,
                                          N_way=N_WAY,
                                          K_shot=K_SHOT,
@@ -900,20 +855,31 @@ OUTPUT_DIM = 12
 LAYER_SIZES = [200, 50, OUTPUT_DIM]
 NUM_EMOTIONS = N_WAY
 
-protomaml_model = ProtoMAML.load_from_checkpoint("saved_models/seed-v/ProtoMAML/lightning_logs/version_11/checkpoints/epoch=39-step=560.ckpt")
+model_ckpt_path = os.path.join(os.curdir, "saved_models", "seed-v", "protomaml_model.ckpt")
+
+if os.path.exists(model_ckpt_path):
+  protomaml_model = ProtoMAML.load_from_checkpoint(model_ckpt_path)
+else:
+  protomaml_model = train_model(ProtoMAML, 
+                                lr=1e-3, 
+                                lr_inner=0.1,
+                                lr_output=0.1,
+                                num_inner_steps=1,
+                                model_args = (EEG_INPUT_DIM, EYE_INPUT_DIM, LAYER_SIZES,
+                                  LAYER_SIZES, OUTPUT_DIM, NUM_EMOTIONS, device),
+                                train_loader=train_protomaml_loader, 
+                                val_loader=val_protomaml_loader)
 
 # %%
 # Opens tensorboard in notebook. Adjust the path to your CHECKPOINT_PATH if needed
-# %tensorboard --logdir saved_models/seed-v/ProtoMAML/lightning_logs/version_10
+# %tensorboard --logdir saved_models/seed-v/ProtoMAML/lightning_logs/version_12
 
 # %% [markdown]
 # # Test meta learning model
 
 # %%
-protomaml_model.hparams.num_inner_steps = 200
-
-# %%
-print(test_set.labels)
+# Increase number of inner steps, if necessary, for further improvement in testing phase
+protomaml_model.hparams.num_inner_steps = 1
 
 # %%
 protomaml_result_file = os.path.join(CHECKPOINT_PATH, "protomaml_fewshot.json")
@@ -926,7 +892,7 @@ if os.path.isfile(protomaml_result_file):
 else:
     # Perform same experiments as for ProtoNet
     protomaml_accuracies = dict()
-    for k in [2, 4, 8, 16, 32]:
+    for k in [5, 10, 15]:
         protomaml_accuracies[k] = test_protomaml(protomaml_model, test_set, k_shot=k)
     # Export results
     with open(protomaml_result_file, 'w') as f:
