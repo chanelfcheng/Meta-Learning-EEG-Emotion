@@ -3,7 +3,6 @@
 
 # %%
 ## Standard libraries
-import sys
 import os
 import numpy as np
 import random
@@ -30,6 +29,7 @@ from tqdm.auto import tqdm
 
 ## PyTorch
 import torch
+torch.manual_seed(0) # Set seed for pytorch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.data as data
@@ -43,7 +43,7 @@ from torchvision import transforms
 # PyTorch Lightning
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
-pl.seed_everything(42)
+pl.seed_everything(42) # Set seed for pytorch lightning
 
 # Import tensorboard
 # %load_ext tensorboard
@@ -96,17 +96,17 @@ class SEEDV(data.Dataset):
         combined labels 
         """
         all_features = None
-        all_combined_labels = None
+        all_combined_targets = None
 
         for idx in range(len(self.tensor_dataset)):
             if all_features == None:
-                all_features, all_combined_labels = self.__getitem__(idx)
+                all_features, all_combined_targets = self.__getitem__(idx)
             else:
-                features, combined_labels = self.__getitem__(idx)
+                features, combined_targets = self.__getitem__(idx)
                 all_features = torch.vstack((all_features, features))
-                all_combined_labels = torch.vstack((all_combined_labels, combined_labels))
+                all_combined_targets = torch.vstack((all_combined_targets, combined_targets))
         
-        return all_features, all_combined_labels
+        return all_features, all_combined_targets
 
     def __len__(self):
         return len(self.tensor_dataset)
@@ -138,9 +138,9 @@ class SEEDV(data.Dataset):
         emotion_num = self.tensor_dataset[idx][1]
         participant_num = self.tensor_dataset[idx][2]
         base = (participant_num - 1) * len(self.emotion_dict)
-        combined_label = base + emotion_num
+        combined_target = base + emotion_num
 
-        return features, combined_label.to(torch.int64)
+        return features, combined_target.to(torch.int64)
 
 # %%
 seed_v = SEEDV(emotion_dict = {0: 'disgust', 1: 'fear', 2: 'sad', 3: 'neutral', 4: 'happy'}, num_participants=16, data_dir=DATASET_PATH)
@@ -153,37 +153,37 @@ classes = torch.randperm(5*16) # Generate random permutation of numbers from 0 t
 train_classes, val_classes, test_classes = classes[:64], classes[64:72], classes[72:] # 80-10-10 split
 
 # %%
-SEEDV_all_features, SEEDV_all_labels = seed_v.get_all_data()
+SEEDV_all_features, SEEDV_all_targets = seed_v.get_all_data()
 
 # %%
 class EEGDataset(data.Dataset):
-    def __init__(self, features, labels):
+    def __init__(self, features, targets):
         super().__init__()
         self.features = features
-        self.labels = labels
+        self.targets = targets
 
     def __getitem__(self, idx):
-        features, labels = self.features[idx], self.labels[idx]
+        features, targets = self.features[idx], self.targets[idx]
 
-        return features, labels
+        return features, targets
 
     def __len__(self):
         return self.features.shape[0]
 
 # %%
-def dataset_from_labels(features, labels, class_set): 
+def dataset_from_labels(features, targets, class_set): 
     # for label in labels:
     #     print(label)
-    class_mask = (labels[:,None] == class_set[None,:]).any(dim=-1) # reshape class mask [[64], [64],... ] -> [64, 64, ...]
-    return EEGDataset(features[class_mask], labels[class_mask]) # reshape labels [[0], [1], ...] -> [0, 1, ...]
+    class_mask = (targets[:,None] == class_set[None,:]).any(dim=-1) # reshape class mask [[64], [64],... ] -> [64, 64, ...]
+    return EEGDataset(features[class_mask], targets[class_mask]) # reshape labels [[0], [1], ...] -> [0, 1, ...]
 
 # %%
 train_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_labels.reshape((1,-1))[0], train_classes)
+    SEEDV_all_features, SEEDV_all_targets.reshape((1,-1))[0], train_classes)
 val_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_labels.reshape((1,-1))[0], val_classes)
+    SEEDV_all_features, SEEDV_all_targets.reshape((1,-1))[0], val_classes)
 test_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_labels.reshape((1,-1))[0], test_classes)
+    SEEDV_all_features, SEEDV_all_targets.reshape((1,-1))[0], test_classes)
 
 # %% [markdown]
 # # Setup dataloaders and samplers
@@ -255,11 +255,16 @@ class FewShotBatchSampler(object):
         # Sample few-shot batches
         start_index = defaultdict(int)
         for it in range(self.iterations):
-            class_batch = self.class_list[it*self.N_way:(it+1)*self.N_way]  # Select N classes for the batch
+            # Select N classes for the batch
+            class_batch = self.class_list[it*self.N_way:(it+1)*self.N_way]
             index_batch = []
             for c in class_batch:  # For each class, select the next K examples and add them to the batch
                 index_batch.extend(self.indices_per_class[c][start_index[c]:start_index[c]+self.K_shot])
                 start_index[c] += self.K_shot
+                try:
+                    self.indices_per_class[c][start_index[c]]
+                except:
+                    start_index[c] = 0
             if self.include_query:  # If we return support+query set, sort them so that they are easy to split
                 index_batch = index_batch[::2] + index_batch[1::2]
             yield index_batch
@@ -268,17 +273,17 @@ class FewShotBatchSampler(object):
         return self.iterations
 
 # %%
-N_WAY = 5
-K_SHOT = 4
+N_WAY = 2
+K_SHOT = 10
 train_data_loader = data.DataLoader(train_set,
-                                    batch_sampler=FewShotBatchSampler(train_set.labels,
+                                    batch_sampler=FewShotBatchSampler(train_set.targets,
                                                                       include_query=True,
                                                                       N_way=N_WAY,
                                                                       K_shot=K_SHOT,
                                                                       shuffle=True),
                                     num_workers=32)
 val_data_loader = data.DataLoader(val_set,
-                                  batch_sampler=FewShotBatchSampler(val_set.labels,
+                                  batch_sampler=FewShotBatchSampler(val_set.targets,
                                                                     include_query=True,
                                                                     N_way=N_WAY,
                                                                     K_shot=K_SHOT,
@@ -290,14 +295,14 @@ val_data_loader = data.DataLoader(val_set,
 # # Split batch into query and support
 
 # %%
-def split_query_support(features, labels):
+def split_query_support(features, targets):
     support_features, query_features = features.chunk(2, dim=0)
-    support_labels, query_labels = labels.chunk(2, dim=0)
-    return support_features, query_features, support_labels, query_labels
+    support_targets, query_targets = targets.chunk(2, dim=0)
+    return support_features, query_features, support_targets, query_targets
 
 # %%
-features, labels = next(iter(val_data_loader))
-support_features, query_features, support_labels, query_labels = split_query_support(features, labels)
+features, targets = next(iter(val_data_loader))
+support_features, query_features, support_targets, query_targets = split_query_support(features, targets)
 
 # fig, ax = plt.subplots(1, 2, figsize=(8, 5))
 # ax[0].plot(support_features, 'o')
@@ -326,10 +331,10 @@ support_pca = pca.fit_transform(support_features)
 query_pca = pca.fit_transform(query_features)
 
 fig, ax = plt.subplots(1, 2, figsize=(8, 5))
-ax[0].scatter(support_pca[:,0], support_pca[:,1], c=support_labels)
+ax[0].scatter(support_pca[:,0], support_pca[:,1], c=support_targets)
 ax[0].set_title("Support set")
 ax[0].axis('off')
-ax[1].scatter(query_pca[:,0], query_pca[:,1], c=query_labels)
+ax[1].scatter(query_pca[:,0], query_pca[:,1], c=query_targets)
 ax[1].set_title("Query set")
 ax[1].axis('off')
 plt.suptitle("Few Shot Batch", weight='bold')
@@ -350,8 +355,6 @@ def cca_metric_derivative(H1, H2):
     # transform the matrix: to be consistent with the original paper
     H1 = H1.T
     H2 = H2.T
-    # if np.isnan(H2).all():
-    #     print("H2 is nan")
     # o1 and o2 are feature dimensions
     # m is sample number
     o1 = o2 = H1.shape[0]
@@ -486,10 +489,7 @@ class TransformLayers(nn.Module):
 
     def forward(self, x):
         for layer in self.layers:
-            # prev_x = x # for debug purpose, remove later
             x = layer(x)
-            # if torch.isnan(x).any():
-            #     print("NaN detected in layer")
         return x
 
 class AttentionFusion(nn.Module):
@@ -599,9 +599,9 @@ class ProtoNet(pl.LightningModule):
 
     def calculate_loss(self, batch, mode):
         # Determine training loss for a given support and query set 
-        imgs, targets = batch
-        features = self.model(imgs)  # Encode all images of support and query set
-        support_feats, query_feats, support_targets, query_targets = split_query_support(features, targets)
+        features, targets = batch
+        outputs = self.model(features)  # Encode all images of support and query set
+        support_feats, query_feats, support_targets, query_targets = split_query_support(outputs, targets)
         prototypes, classes = ProtoNet.calculate_prototypes(support_feats, support_targets)
         preds, labels, acc = self.classify_feats(prototypes, classes, query_feats, query_targets)
         loss = F.cross_entropy(preds, labels)
@@ -642,20 +642,21 @@ class ProtoMAML(pl.LightningModule):
         scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[140,180], gamma=0.1)
         return [optimizer], [scheduler]
         
-    def run_model(self, local_model, output_weight, output_bias, features, labels):
+    def run_model(self, local_model, output_weight, output_bias, features, target_indices):
         # Execute a model with given output layer weights and inputs
-        out = local_model(features)
-        # get only first element of tuple in feats
-        preds = F.linear(out[0], output_weight, output_bias)
+        dcca_out = local_model(features)
+        out = dcca_out[0]
+        cca_loss = dcca_out[1]
+        preds = F.linear(out, output_weight, output_bias)
         # loss = F.cross_entropy(preds, labels.reshape((-1,1))[0]) 
         # already RESHAPED EARLIER in dataset_from_labels calls
-        loss = F.cross_entropy(preds, labels)
-        acc = (preds.argmax(dim=1) == labels).float()
+        loss = 0.7 * cca_loss + 1.0 * F.cross_entropy(preds, target_indices)
+        acc = (preds.argmax(dim=1) == target_indices).float()
         return loss, preds, acc
         
-    def adapt_few_shot(self, support_imgs, support_targets):
+    def adapt_few_shot(self, support_features, support_targets):
         # Determine prototype initialization
-        support_feats = self.model(support_imgs)
+        support_feats = self.model(support_features)
         prototypes, classes = ProtoNet.calculate_prototypes(support_feats, support_targets)
         support_labels = (classes[None,:] == support_targets[:,None]).long().argmax(dim=-1)
         # Create inner-loop model and optimizer
@@ -672,7 +673,7 @@ class ProtoMAML(pl.LightningModule):
         # Optimize inner loop model on support set
         for _ in range(self.hparams.num_inner_steps):
             # Determine loss on the support set
-            loss, _, _ = self.run_model(local_model, output_weight, output_bias, support_imgs, support_labels)
+            loss, _, _ = self.run_model(local_model, output_weight, output_bias, support_features, support_labels)
             # Calculate gradients and perform inner loop update
             loss.backward()
             local_optim.step()
@@ -697,13 +698,13 @@ class ProtoMAML(pl.LightningModule):
         
         # Determine gradients for batch of tasks
         for task_batch in batch:
-            imgs, targets = task_batch
-            support_imgs, query_imgs, support_targets, query_targets = split_query_support(imgs, targets)
+            features, targets = task_batch
+            support_features, query_features, support_targets, query_targets = split_query_support(features, targets)
             # Perform inner loop adaptation
-            local_model, output_weight, output_bias, classes = self.adapt_few_shot(support_imgs, support_targets)
+            local_model, output_weight, output_bias, classes = self.adapt_few_shot(support_features, support_targets)
             # Determine loss of query set
             query_labels = (classes[None,:] == query_targets[:,None]).long().argmax(dim=-1)
-            loss, preds, acc = self.run_model(local_model, output_weight, output_bias, query_imgs, query_labels)
+            loss, preds, acc = self.run_model(local_model, output_weight, output_bias, query_features, query_labels)
             # Calculate gradients for query set loss
             if mode == "train":
                 loss.backward()
@@ -731,6 +732,12 @@ class ProtoMAML(pl.LightningModule):
         # Validation requires to finetune a model, hence we need to enable gradients
         torch.set_grad_enabled(True)
         self.outer_loop(batch, mode="val")
+        torch.set_grad_enabled(False)
+    
+    def test_step(self, batch, batch_idx):
+        # Testing requires to finetune a model, hence we need to enable gradients
+        torch.set_grad_enabled(True)
+        self.outer_loop(batch, mode="test")
         torch.set_grad_enabled(False)
 
 # %% [markdown]
@@ -773,26 +780,26 @@ class TaskBatchSampler(object):
     def get_collate_fn(self):
         # Returns a collate function that converts one big tensor into a list of task-specific tensors
         def collate_fn(item_list):
-            imgs = torch.stack([img for img, target in item_list], dim=0)
-            targets = torch.stack([target for img, target in item_list], dim=0)
-            imgs = imgs.chunk(self.task_batch_size, dim=0)
+            features = torch.stack([feat for feat, target in item_list], dim=0)
+            targets = torch.stack([target for feat, target in item_list], dim=0)
+            features = features.chunk(self.task_batch_size, dim=0)
             targets = targets.chunk(self.task_batch_size, dim=0)
-            return list(zip(imgs, targets))
+            return list(zip(features, targets))
         return collate_fn
 
 # %% [markdown]
-# ## Define model training and testing methods
+# # Train meta learning model
 
 # %%
 def train_model(model_class, train_loader, val_loader, **kwargs):
     trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, model_class.__name__),
                          accelerator="gpu" if str(device).startswith("cuda") else "cpu",
                          devices=1,
-                         max_epochs=50,
-                         callbacks=[ModelCheckpoint(save_weights_only=True, mode="max", monitor="val_acc", every_n_epochs=1),
+                         max_epochs=30,
+                         callbacks=[ModelCheckpoint(save_weights_only=False, mode="min", monitor="val_loss", every_n_epochs=1),
                                     LearningRateMonitor("epoch")],
                          enable_progress_bar=False,
-                         log_every_n_steps=12)
+                         log_every_n_steps=10)
     trainer.logger._default_hp_metric = None
 
     # Check whether pretrained model exists. If yes, load it and skip training
@@ -809,69 +816,15 @@ def train_model(model_class, train_loader, val_loader, **kwargs):
         model = model_class.load_from_checkpoint(
             trainer.checkpoint_callback.best_model_path)  # Load best checkpoint after training
 
-    return model
-
-def test_protomaml(model, dataset, k_shot=4):
-    pl.seed_everything(42)
-    model = model.to(device)
-    num_classes = dataset.labels.unique().shape[0]
-    exmps_per_class = dataset.labels.shape[0]//num_classes
-    
-    # Data loader for full test set as query set
-    full_dataloader = data.DataLoader(dataset, 
-                                      batch_size=128, 
-                                      num_workers=32, 
-                                      shuffle=False, 
-                                      drop_last=False)
-    # Data loader for sampling support sets
-    sampler = FewShotBatchSampler(dataset.labels, 
-                                  include_query=False,
-                                  N_way=num_classes,
-                                  K_shot=k_shot,
-                                  shuffle=False,
-                                  shuffle_once=False)
-    sample_dataloader = data.DataLoader(dataset, 
-                                        batch_sampler=sampler,
-                                        num_workers=32)
-    
-    # We iterate through the full dataset in two manners. First, to select the k-shot batch. 
-    # Second, the evaluate the model on all other examples
-    accuracies = []
-    for (support_imgs, support_targets), support_indices in tqdm(zip(sample_dataloader, sampler), "Performing few-shot finetuning"):
-        support_imgs = support_imgs.to(device)
-        support_targets = support_targets.to(device)
-        # Finetune new model on support set
-        try:
-            local_model, output_weight, output_bias, classes = model.adapt_few_shot(support_imgs, support_targets)
-            with torch.no_grad():  # No gradients for query set needed
-                local_model.eval()
-                batch_acc = torch.zeros((0,), dtype=torch.float32, device=device)
-                # Evaluate all examples in test dataset
-                for query_imgs, query_targets in full_dataloader:
-                    query_imgs = query_imgs.to(device)
-                    query_targets = query_targets.to(device)
-                    query_labels = (classes[None,:] == query_targets[:,None]).long().argmax(dim=-1)
-                    _, _, acc = model.run_model(local_model, output_weight, output_bias, query_imgs, query_labels)
-                    batch_acc = torch.cat([batch_acc, acc.detach()], dim=0)
-                # Exclude support set elements
-                for s_idx in support_indices:
-                    batch_acc[s_idx] = 0
-                batch_acc = batch_acc.sum().item() / (batch_acc.shape[0] - len(support_indices))
-                accuracies.append(batch_acc)
-        except np.linalg.LinAlgError:
-            print("NaN layer encountered")
-    return mean(accuracies), stdev(accuracies)
-
-# %% [markdown]
-# # Train meta learning model
+    return model, trainer
 
 # %%
 # Training constant (same as for ProtoNet)
-N_WAY = 5
+N_WAY = 2
 K_SHOT = 10
 
 # Training set
-train_protomaml_sampler = TaskBatchSampler(train_set.labels, 
+train_protomaml_sampler = TaskBatchSampler(train_set.targets, 
                                            include_query=True,
                                            N_way=N_WAY,
                                            K_shot=K_SHOT,
@@ -882,11 +835,11 @@ train_protomaml_loader = data.DataLoader(train_set,
                                          num_workers=32)
 
 # Validation set
-val_protomaml_sampler = TaskBatchSampler(val_set.labels, 
+val_protomaml_sampler = TaskBatchSampler(val_set.targets, 
                                          include_query=True,
                                          N_way=N_WAY,
                                          K_shot=K_SHOT,
-                                         batch_size=1,  # We do not update the parameters, hence the batch size is irrelevant here
+                                         batch_size=16,  # We do not update the parameters, hence the batch size is irrelevant here
                                          shuffle=False)
 val_protomaml_loader = data.DataLoader(val_set, 
                                        batch_sampler=val_protomaml_sampler,
@@ -900,40 +853,61 @@ OUTPUT_DIM = 12
 LAYER_SIZES = [200, 50, OUTPUT_DIM]
 NUM_EMOTIONS = N_WAY
 
-protomaml_model = ProtoMAML.load_from_checkpoint("saved_models/seed-v/ProtoMAML/lightning_logs/version_11/checkpoints/epoch=39-step=560.ckpt")
-
-# %%
-# Opens tensorboard in notebook. Adjust the path to your CHECKPOINT_PATH if needed
-# %tensorboard --logdir saved_models/seed-v/ProtoMAML/lightning_logs/version_10
+protomaml_model, trainer = train_model(ProtoMAML, 
+                              lr=1e-3, 
+                              lr_inner=0.1,
+                              lr_output=0.1,
+                              num_inner_steps=1,
+                              model_args = (EEG_INPUT_DIM, EYE_INPUT_DIM, LAYER_SIZES,
+                                LAYER_SIZES, OUTPUT_DIM, NUM_EMOTIONS, device),
+                              train_loader=train_protomaml_loader, 
+                              val_loader=val_protomaml_loader)
 
 # %% [markdown]
 # # Test meta learning model
 
 # %%
-protomaml_model.hparams.num_inner_steps = 200
+def test_protomaml(model, trainer, dataset, n_way, k_shot=4):
+    pl.seed_everything(42)  # To be reproducable
+    
+    # Model
+    model = model.to(device)
+    
+    # Test set
+    test_protomaml_sampler = TaskBatchSampler(dataset.targets, 
+                                            include_query=True,
+                                            N_way=n_way,
+                                            K_shot=k_shot,
+                                            batch_size=16,  # We do not update the parameters, hence the batch size is irrelevant here
+                                            shuffle=False)
+    test_protomaml_loader = data.DataLoader(dataset, 
+                                        batch_sampler=test_protomaml_sampler,
+                                        collate_fn=test_protomaml_sampler.get_collate_fn(),
+                                        num_workers=32)
+
+    results = trainer.test(model, test_protomaml_loader)
+
+    return results
 
 # %%
-print(test_set.labels)
+# Reduce inner learning rate for few shot and increase number of inner steps, if necessary, for further 
+# improvement during testing phase
+protomaml_model.hparams.lr_inner = 0.1
+protomaml_model.hparams.lr_output = 0.1
+protomaml_model.hparams.num_inner_steps = 1
 
 # %%
 protomaml_result_file = os.path.join(CHECKPOINT_PATH, "protomaml_fewshot.json")
 
-if os.path.isfile(protomaml_result_file):
-    # Load pre-computed results
-    with open(protomaml_result_file, 'r') as f:
-        protomaml_accuracies = json.load(f)
-    protomaml_accuracies = {int(k): v for k, v in protomaml_accuracies.items()}
-else:
-    # Perform same experiments as for ProtoNet
-    protomaml_accuracies = dict()
-    for k in [2, 4, 8, 16, 32]:
-        protomaml_accuracies[k] = test_protomaml(protomaml_model, test_set, k_shot=k)
-    # Export results
-    with open(protomaml_result_file, 'w') as f:
-        json.dump(protomaml_accuracies, f, indent=4)
-
-for k in protomaml_accuracies:
-    print(f"Accuracy for k={k}: {100.0*protomaml_accuracies[k][0]:4.2f}% (+-{100.0*protomaml_accuracies[k][1]:4.2f}%)")
+# Perform same experiments as for ProtoNet
+protomaml_accuracies = dict()
+for k in [5, 10, 15]:
+    protomaml_accuracies[k] = test_protomaml(protomaml_model, trainer, test_set, n_way=N_WAY, k_shot=k)
+    print(protomaml_accuracies[k])
+    # print(f"Accuracy for k={k}: {100.0*protomaml_accuracies[k][0]:4.2f}% (+-{100.0*protomaml_accuracies[k][1]:4.2f}%)")
+# Export results
+with open(protomaml_result_file, 'w') as f:
+    json.dump(protomaml_accuracies, f, indent=4)
 
 # %%
 def plot_few_shot(acc_dict, name, color=None, ax=None):
