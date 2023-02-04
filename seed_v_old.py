@@ -205,6 +205,8 @@ train_sets = [EEGDataset(*seed_v[i]) for i in train_tasks]
 val_sets = [EEGDataset(*seed_v[i]) for i in val_tasks]
 test_sets = [EEGDataset(*seed_v[i]) for i in test_tasks]
 
+# features are still in the sets. ^
+
 # %% [markdown]
 # # Setup dataloaders and samplers
 
@@ -294,8 +296,7 @@ class FewShotBatchSampler(object):
         return self.iterations
 
 # %%
-# dataloader with BatchSchedulerSampler
-train_dataloaders = [data.DataLoader(dataset=train_sets[i],
+train_loaders = [data.DataLoader(dataset=train_sets[i],
                                     batch_sampler=FewShotBatchSampler(train_sets[i].targets,
                                                                   N_way=N_WAY,
                                                                   K_shot=K_SHOT,
@@ -303,7 +304,9 @@ train_dataloaders = [data.DataLoader(dataset=train_sets[i],
                                                                   shuffle=False),
                                     num_workers=32) for i in range(len(train_sets))]
 
-val_dataloaders = [data.DataLoader(dataset=val_sets[i],
+
+
+val_loaders = [data.DataLoader(dataset=val_sets[i],
                                     batch_sampler=FewShotBatchSampler(val_sets[i].targets,
                                                                   N_way=N_WAY,
                                                                   K_shot=K_SHOT,
@@ -311,10 +314,6 @@ val_dataloaders = [data.DataLoader(dataset=val_sets[i],
                                                                   shuffle=False,
                                                                   shuffle_once=False),
                                     num_workers=32) for i in range(len(val_sets))]
-
-# for step, (features, targets) in enumerate(val_dataloaders[0]):
-#     print(targets)
-
 
 # %% [markdown]
 # # Split batch into query and support
@@ -326,7 +325,7 @@ def split_query_support(features, targets):
     return support_features, query_features, support_targets, query_targets
 
 # %%
-features, targets = next(iter(val_dataloaders[0]))
+features, targets = next(iter(val_loaders[0]))
 support_features, query_features, support_targets, query_targets = split_query_support(features, targets)
 
 # fig, ax = plt.subplots(1, 2, figsize=(8, 5))
@@ -771,7 +770,7 @@ class ProtoMAML(pl.LightningModule):
 # %%
 class TaskBatchSampler(object):
     
-    def __init__(self, dataset_targets, batch_size, N_way, K_shot, include_query=False, shuffle=True):
+    def __init__(self, dataset_targets, batch_size, N_way, K_shot, include_query=False, shuffle=False):
         """
         Inputs:
             dataset_targets - PyTorch tensor of the labels of the data elements.
@@ -854,7 +853,7 @@ for i in range(len(train_sets)):
                                             include_query=True,
                                             N_way=N_WAY,
                                             K_shot=K_SHOT,
-                                            batch_size=6)
+                                            batch_size=1)
     train_protomaml_loaders.append(data.DataLoader(train_sets[i], 
                                             batch_sampler=train_protomaml_sampler,
                                             collate_fn=train_protomaml_sampler.get_collate_fn(),
@@ -868,9 +867,9 @@ for i in range(len(val_sets)):
                                             include_query=True,
                                             N_way=N_WAY,
                                             K_shot=K_SHOT,
-                                            batch_size=6,  # We do not update the parameters, hence the batch size is irrelevant here
+                                            batch_size=1,  # We do not update the parameters, hence the batch size is irrelevant here
                                             shuffle=False)
-    val_protomaml_loaders.append(data.DataLoader(val_sets[i].targets, 
+    val_protomaml_loaders.append(data.DataLoader(val_sets[i], 
                                         batch_sampler=val_protomaml_sampler,
                                         collate_fn=val_protomaml_sampler.get_collate_fn(),
                                         num_workers=32))
@@ -902,7 +901,7 @@ def test_protomaml(model, trainer, dataset, n_way, k_shot=4):
     num_classes = dataset.targets.unique().shape[0]
 
     # Data loader for full test set as query set
-    full_dataloader = data.DataLoader(dataset, batch_size=128, num_workers=32, shuffle=False, drop_last=False)
+    full_dataloader = data.DataLoader(dataset, batch_size=1, num_workers=32, shuffle=False, drop_last=False)
     # Data loader for sampling support sets
     sampler = FewShotBatchSampler(
         dataset.targets, include_query=False, N_way=n_way, K_shot=k_shot, shuffle=False, shuffle_once=False
@@ -947,13 +946,11 @@ protomaml_model.hparams.num_inner_steps = 10
 protomaml_result_file = os.path.join(CHECKPOINT_PATH, "protomaml_fewshot.json")
 
 # Perform same experiments as for ProtoNet
-protomaml_accuracies = dict()
-for k in [5, 10, 15]:
-    protomaml_accuracies[k] = test_protomaml(protomaml_model, trainer, test_set, n_way=N_WAY, k_shot=k)
-    print(f"Accuracy for k={k}: {100.0*protomaml_accuracies[k][0]:4.2f}% (+-{100.0*protomaml_accuracies[k][1]:4.2f}%)")
+protomaml_accuracies = test_protomaml(protomaml_model, trainer, test_sets, n_way=N_WAY, k_shot=K_SHOT)
+print(f"Accuracy for k={K_SHOT}: {100.0*protomaml_accuracies[0]:4.2f}% (+-{100.0*protomaml_accuracies[1]:4.2f}%)")
 # Export results
-with open(protomaml_result_file, 'w') as f:
-    json.dump(protomaml_accuracies, f, indent=4)
+# with open(protomaml_result_file, 'w') as f:
+#     json.dump(protomaml_accuracies, f, indent=4)
 
 # %%
 def plot_few_shot(acc_dict, name, color=None, ax=None):
