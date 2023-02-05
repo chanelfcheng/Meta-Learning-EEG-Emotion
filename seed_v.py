@@ -48,7 +48,7 @@ pl.seed_everything(42) # Set seed for pytorch lightning
 # Import tensorboard
 # %load_ext tensorboard
 
-device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:1") if torch.cuda.is_available() else torch.device("cpu")
 print("Device:", device)
 
 # %% [markdown]
@@ -65,125 +65,152 @@ CHECKPOINT_PATH = "saved_models/seed-v"
 
 # %%
 class SEEDV(data.Dataset):
-    def __init__(self, emotion_dict, num_participants, data_dir):
+    def __init__(self, emotion_dict: dict, num_subjects: int, data_path: str):
+        """constructor for SEEDV dataset
+
+        Args:
+            emotion_dict (dict): dictionary of emotion_num as key and
+            emotion_str as value
+            num_subjects (int): number of subjects in the dataset
+            data_path (str): path to the directory containing npy data files
+        """
         self.emotion_dict = emotion_dict
-        self.num_participants = num_participants
-        self.data_dir = data_dir
+        self.num_subjects = num_subjects
+        self.data_path = data_path
         self.tensor_dataset = self.load_data()
-    
+
     def load_data(self):
-        dataset = None           
-        for file in os.listdir(self.data_dir):
-            file_path = os.path.join(self.data_dir, file)
+        """load data from npy files to create tensor dataset
+
+        Returns:
+            data.TensorDataset: tensor dataset containing 
+                all data from all npy files
+        """
+        # initialize dataset and subjects to None at start
+        dataset = None
+        subjects = None
+
+        # loop through all files in the directory
+        for file in os.listdir(self.data_path):
+            # get the file path of the file
+            file_path = os.path.join(self.data_path, file)
+
+            # get subject number from the filename
+            s_num = np.int64(re.findall("\d+", file)[0]) - 1
+
+            # if dataset has not been created yet
             if dataset is None:
-                target = np.int64(re.findall("\d+", file)[0])
-                for i in range(1, len(np.load(file_path))):
-                    target = np.hstack((target, int(re.findall("\d+", file)[0])))
+                # create subject meta labels for each sample in dataset
+                for i in range(len(np.load(file_path))):
+                    if subjects is None:
+                        subjects = s_num
+                    else:
+                        # need to hstack subjects to match tensor shapes of emotion
+                        subjects = np.hstack((subjects, s_num))
+                # load the data from the npy file
                 dataset = np.load(file_path)
+            # else if dataset already exists
             else:
                 for i in range(len(np.load(file_path))):
-                    target = np.hstack((target, np.int64(re.findall("\d+", file)[0])))
+                    # hstack subjects to match tensor shapes of emotion
+                    subjects = np.hstack((subjects, s_num))
+                # stack the data vertically
                 dataset = np.vstack((dataset, np.load(file_path)))
 
-        tensor_dataset = data.TensorDataset(torch.from_numpy(dataset[:, :-1]), torch.from_numpy(dataset[:, -1]), torch.from_numpy(target))
-                    
+        # create tensor dataset with subject meta labels, features, and emotion labels
+        tensor_dataset = data.TensorDataset(torch.from_numpy(
+            subjects), torch.from_numpy(dataset[:, :-1]), torch.from_numpy(dataset[:, -1]))
+
         return tensor_dataset
-    
-    def get_all_data(self):
-        """
-        same as self.__getitem__(self, idx) but instead of a specific index
-        this function will return all the tuple that contains all features and 
-        combined labels 
+
+    def get_subjects_data(self, s_nums: list):
+        """get data for only subjects in s_nums
+
+        Args:
+            s_nums (list): list of subject numbers that identifies subjects
+
+        Returns:
+            tuple of torch.tensor: all features and all emotion numbers for only
+            specified subjects
         """
         all_features = None
-        all_combined_targets = None
+        all_emotions = None
+        all_subjects = None
 
-        for idx in range(len(self.tensor_dataset)):
+        for s_num in s_nums:
             if all_features == None:
-                all_features, all_combined_targets = self.__getitem__(idx)
+                all_features, all_emotions, all_subjects = self.__getitem__(s_num)
             else:
-                features, combined_targets = self.__getitem__(idx)
+                features, targets, subjects = self.__getitem__(s_num)
                 all_features = torch.vstack((all_features, features))
-                all_combined_targets = torch.vstack((all_combined_targets, combined_targets))
-        
-        return all_features, all_combined_targets
+                all_emotions = torch.vstack((all_emotions, targets))
+                all_subjects = torch.vstack((all_subjects, subjects))
+
+        return all_features, all_emotions.reshape((1,-1))[0], all_subjects.reshape((1,-1))[0]
 
     def __len__(self):
+        """get number of samples in dataset
+
+        Returns:
+            int: number of samples in dataset
+        """
         return len(self.tensor_dataset)
+
+    def __getitem__(self, s_num: int):
+        """get data for a given s_num
+
+        Args:
+            s_num (int): number that identifies a subject
+
+        Returns:
+            tuple of torch.tensor: features and corresponding emotion numbers
+        """
+        indices = torch.where(self.tensor_dataset[:][0] == s_num, True, False)
+        # all of the following has the length of 1823
+        # features = tensor([[11.0517, 9.1559, 9.5510, ...]])
+        features = self.tensor_dataset[indices][1]
+        # emotion_nums = tensor([4, 4, 4,  ..., 0, 0, 0])
+        emotion_nums = self.tensor_dataset[indices][2]
+        # s_nums = tensor([6, 6, 6,  ..., 6, 6, 6]) always s_num
+        s_nums = torch.full((len(emotion_nums),), s_num, dtype=torch.int64)
         
-    def __getitem__(self, idx):
-        """
-        return a tuple of features, combined_label (from participant and emotion)
-        p1: 0 1 2 3 4,
-        p2: 5 6 7 8 9,
-        ...
-        p16: 75 76 77 78 79
-
-        we are only given participant # and emotion #
-        p1_0: 0 = (1 - 1) * 5
-        p1_1: 1 = 0 + 1
-        p1_2: 2 = 0 + 2
-        p1_3: 3 = 0 + 3
-        p1_4: 4 = 0 + 4
-        p2_0: 5 = (2 - 1) * 5
-        p2_1: 6 = 5 + 1
-        p2_2: 7 = 5 + 2
-        p2_3: 8 = 5 + 3
-        p2_4: 9 = 5 + 4
-        ..
-        p16_0: 75 = (16 - 1) * 5 = 75
-        ...
-        """
-        features = self.tensor_dataset[idx][0]
-        emotion_num = self.tensor_dataset[idx][1]
-        participant_num = self.tensor_dataset[idx][2]
-        base = (participant_num - 1) * len(self.emotion_dict)
-        combined_target = base + emotion_num
-
-        return features, combined_target.to(torch.int64)
+        return features, emotion_nums.to(torch.int64).reshape((1,-1))[0], s_nums.reshape((1,-1))[0]
 
 # %%
-seed_v = SEEDV(emotion_dict = {0: 'disgust', 1: 'fear', 2: 'sad', 3: 'neutral', 4: 'happy'}, num_participants=16, data_dir=DATASET_PATH)
+seed_v = SEEDV(emotion_dict = {0: 'disgust', 1: 'fear', 2: 'sad', 3: 'neutral', 4: 'happy'}, num_subjects=16, data_path=DATASET_PATH)
 
 # %% [markdown]
 # # Perform a train-val-test split by label
 
 # %%
-classes = torch.randperm(5*16) # Generate random permutation of numbers from 0 to 79
-train_classes, val_classes, test_classes = classes[:64], classes[64:72], classes[72:] # 80-10-10 split
-
-# %%
-SEEDV_all_features, SEEDV_all_targets = seed_v.get_all_data()
+tasks = torch.randperm(16) # random permutation of subjects 0 to 15 which are the metaclasses
+train_tasks, val_tasks, test_tasks = tasks[0:12], tasks[12:14], tasks[14:16]
 
 # %%
 class EEGDataset(data.Dataset):
-    def __init__(self, features, targets):
+    def __init__(self, features, targets, subjects):
         super().__init__()
         self.features = features
         self.targets = targets
+        self.subjects = subjects
 
     def __getitem__(self, idx):
-        features, targets = self.features[idx], self.targets[idx]
+        feature, target, subject = self.features[idx], self.targets[idx], self.subjects[idx]
 
-        return features, targets
+        return feature, target, subject
 
     def __len__(self):
         return self.features.shape[0]
 
 # %%
-def dataset_from_labels(features, targets, class_set): 
-    # for label in labels:
-    #     print(label)
-    class_mask = (targets[:,None] == class_set[None,:]).any(dim=-1) # reshape class mask [[64], [64],... ] -> [64, 64, ...]
-    return EEGDataset(features[class_mask], targets[class_mask]) # reshape labels [[0], [1], ...] -> [0, 1, ...]
+# this dataset contains data from subjects 0 - 11 (training subjects)
+train_set = EEGDataset(*seed_v.get_subjects_data(train_tasks))
 
-# %%
-train_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_targets.reshape((1,-1))[0], train_classes)
-val_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_targets.reshape((1,-1))[0], val_classes)
-test_set = dataset_from_labels(
-    SEEDV_all_features, SEEDV_all_targets.reshape((1,-1))[0], test_classes)
+# this dataset contains data from validation subjects
+val_set = EEGDataset(*seed_v.get_subjects_data(val_tasks))
+
+# this dataset contains data from testing subjects
+test_set = EEGDataset(*seed_v.get_subjects_data(test_tasks))
 
 # %% [markdown]
 # # Setup dataloaders and samplers
@@ -191,7 +218,7 @@ test_set = dataset_from_labels(
 # %%
 class FewShotBatchSampler(object):
 
-    def __init__(self, dataset_targets, N_way, K_shot, include_query=False, shuffle=True, shuffle_once=False):
+    def __init__(self, dataset_targets, dataset_subjects, N_way, K_shot, include_query=False, shuffle=False, shuffle_once=False):
         """
         Inputs:
             dataset_targets - PyTorch tensor of the labels of the data elements.
@@ -208,7 +235,10 @@ class FewShotBatchSampler(object):
                            (for validation)
         """
         super().__init__()
-        self.dataset_targets = dataset_targets
+        self.dataset_targets = dataset_targets # emotion labels
+        self.dataset_subjects = dataset_subjects # subject labels
+        # dataset_targets[n] is associated with dataset_subjects[n]? yes     
+        
         self.N_way = N_way
         self.K_shot = K_shot
         self.shuffle = shuffle
@@ -225,17 +255,59 @@ class FewShotBatchSampler(object):
         for c in self.classes:
             self.indices_per_class[c] = torch.where(self.dataset_targets == c)[0]
             self.batches_per_class[c] = self.indices_per_class[c].shape[0] // self.K_shot
-
+    
         # Create a list of classes from which we select the N classes per batch
         self.iterations = sum(self.batches_per_class.values()) // self.N_way
         self.class_list = [c for c in self.classes for _ in range(self.batches_per_class[c])]
-        if shuffle_once or self.shuffle:
-            self.shuffle_data()
-        else:
-            # For testing, we iterate over classes instead of shuffling them
-            sort_idxs = [i+p*self.num_classes for i,
-                         c in enumerate(self.classes) for p in range(self.batches_per_class[c])]
-            self.class_list = np.array(self.class_list)[np.argsort(sort_idxs)].tolist()
+        
+        ###### TESTING BEGIN ######
+        self.subjects = torch.unique(self.dataset_subjects).tolist()
+        self.num_subjects = len(self.subjects)
+        self.indices_per_subject = {}
+        self.samples_per_subject = {}
+        self.start_index = 0
+        self.current_subject = 0
+        self.visited = {}
+    
+        for s in self.subjects:
+            self.visited[s] = []
+            self.indices_per_subject[s] = torch.where(self.dataset_subjects == s)[0]
+            self.samples_per_subject[s] = self.indices_per_subject[s].shape[0]
+        ###### TESTING END ######
+
+    ###### TESTING BEGIN ######
+    def select_subject_batch(self, subject_num):
+        selected_count = defaultdict(int)
+        for i in range(self.num_classes):
+            selected_count[i] = 0
+        
+        selected_indices = []
+        for i in range(self.start_index, self.start_index+self.samples_per_subject[subject_num]):
+            if i not in self.visited[subject_num]:
+                cur = self.dataset_targets[i].item()
+                if selected_count[cur] < self.K_shot:
+                    selected_indices.append(i)
+                    selected_count[cur] += 1
+                    self.visited[subject_num].append(i)
+                elif sum(selected_count.values()) == self.batch_size:
+                    break
+        while sum(selected_count.values()) < self.batch_size:
+            for i in range(self.start_index, self.start_index+self.samples_per_subject[subject_num]):
+                # if i not in self.visited:
+                cur = self.dataset_targets[i].item()
+                if selected_count[cur] < self.K_shot:
+                    selected_indices.append(i)
+                    selected_count[cur] += 1
+                    self.visited[subject_num].append(i)
+                elif sum(selected_count.values()) == self.batch_size:
+                    break
+            # handle all idx is being marked as visited
+            if len(self.visited[subject_num]) == self.samples_per_subject[subject_num]:
+                # all marked! cant select anymore
+                break
+
+        return selected_indices
+    ###### TESTING END ######
 
     def shuffle_data(self):
         # Shuffle the examples per class
@@ -245,38 +317,62 @@ class FewShotBatchSampler(object):
         # Shuffle the class list from which we sample. Note that this way of shuffling
         # does not prevent to choose the same class twice in a batch. However, for 
         # training and validation, this is not a problem.
-        random.shuffle(self.class_list)
+        # random.shuffle(self.class_list)
+        ###### TESTING BEGIN ######
+        ###### TESTING END ######
+
+        
 
     def __iter__(self):
         # Shuffle data
         if self.shuffle:
             self.shuffle_data()
 
-        # Sample few-shot batches
-        start_index = defaultdict(int)
-        for it in range(self.iterations):
-            # Select N classes for the batch
-            class_batch = self.class_list[it*self.N_way:(it+1)*self.N_way]
-            index_batch = []
-            for c in class_batch:  # For each class, select the next K examples and add them to the batch
-                index_batch.extend(self.indices_per_class[c][start_index[c]:start_index[c]+self.K_shot])
-                start_index[c] += self.K_shot
-                try:
-                    self.indices_per_class[c][start_index[c]]
-                except:
-                    start_index[c] = 0
-            if self.include_query:  # If we return support+query set, sort them so that they are easy to split
-                index_batch = index_batch[::2] + index_batch[1::2]
-            yield index_batch
+        # # Sample few-shot batches
+        # start_index = defaultdict(int)
+        # for it in range(self.iterations):
+        #     # Select N classes for the batch
+        #     # class_batch = self.class_list[it*self.N_way:(it+1)*self.N_way]
+        #     class_batch = random.sample(self.classes, self.N_way)
+        #     index_batch = []
+        #     for c in class_batch:  # For each class, select the next K examples and add them to the batch
+        #         index_batch.extend(self.indices_per_class[c][start_index[c]:start_index[c]+self.K_shot])
+        #         start_index[c] += self.K_shot
+        #         try:
+        #             self.indices_per_class[c][start_index[c]]
+        #         except:
+        #             start_index[c] = 0
+        #     if self.include_query:  # If we return support+query set, sort them so that they are easy to split
+        #         index_batch = index_batch[::2] + index_batch[1::2]
+        #     yield index_batch
+        
+        ###### TESTING BEGIN ######
+        # keep track of which subject we are on.
+        # self.current_subject = 0
+        # we need to move on to the next subject when num_marked % num_samples_per_subject == 0
+        for s in self.subjects:
+            # select the subject batch
+            while (len(self.visited[s]) < self.samples_per_subject[s]):
+                # select the subject batch
+                selected_indices = self.select_subject_batch(s)
+                # shuffle the indices
+                selected_indices = random.sample(selected_indices, len(selected_indices))
+                # yield the selected indices
+                yield selected_indices
+            
+            self.start_index += self.samples_per_subject[s]
+        
+        ###### TESTING END ######
 
     def __len__(self):
         return self.iterations
 
 # %%
-N_WAY = 2
+N_WAY = 5
 K_SHOT = 10
 train_data_loader = data.DataLoader(train_set,
                                     batch_sampler=FewShotBatchSampler(train_set.targets,
+                                                                      train_set.subjects,
                                                                       include_query=True,
                                                                       N_way=N_WAY,
                                                                       K_shot=K_SHOT,
@@ -284,6 +380,7 @@ train_data_loader = data.DataLoader(train_set,
                                     num_workers=32)
 val_data_loader = data.DataLoader(val_set,
                                   batch_sampler=FewShotBatchSampler(val_set.targets,
+                                                                    val_set.subjects,
                                                                     include_query=True,
                                                                     N_way=N_WAY,
                                                                     K_shot=K_SHOT,
@@ -301,7 +398,11 @@ def split_query_support(features, targets):
     return support_features, query_features, support_targets, query_targets
 
 # %%
-features, targets = next(iter(val_data_loader))
+features, targets, _ = next(iter(val_data_loader))
+print(features)
+input()
+print(targets)
+input()
 support_features, query_features, support_targets, query_targets = split_query_support(features, targets)
 
 # fig, ax = plt.subplots(1, 2, figsize=(8, 5))
@@ -746,7 +847,7 @@ class ProtoMAML(pl.LightningModule):
 # %%
 class TaskBatchSampler(object):
     
-    def __init__(self, dataset_targets, batch_size, N_way, K_shot, include_query=False, shuffle=True):
+    def __init__(self, dataset_targets, dataset_subjects, batch_size, N_way, K_shot, include_query=False, shuffle=True):
         """
         Inputs:
             dataset_targets - PyTorch tensor of the labels of the data elements.
@@ -761,7 +862,8 @@ class TaskBatchSampler(object):
                       iteration (for training)
         """
         super().__init__()
-        self.batch_sampler = FewShotBatchSampler(dataset_targets, N_way, K_shot, include_query, shuffle)
+        # TODO: update param to pass in dataset_subjects
+        self.batch_sampler = FewShotBatchSampler(dataset_targets, dataset_subjects, N_way, K_shot, include_query, shuffle)
         self.task_batch_size = batch_size
         self.local_batch_size = self.batch_sampler.batch_size
         
@@ -796,7 +898,7 @@ def train_model(model_class, train_loader, val_loader, **kwargs):
                          accelerator="gpu" if str(device).startswith("cuda") else "cpu",
                          devices=1,
                          max_epochs=30,
-                         callbacks=[ModelCheckpoint(save_weights_only=False, mode="min", monitor="val_loss", every_n_epochs=1),
+                         callbacks=[ModelCheckpoint(save_weights_only=True, mode="min", monitor="val_loss", every_n_epochs=1),
                                     LearningRateMonitor("epoch")],
                          enable_progress_bar=False,
                          log_every_n_steps=10)
@@ -820,15 +922,19 @@ def train_model(model_class, train_loader, val_loader, **kwargs):
 
 # %%
 # Training constant (same as for ProtoNet)
-N_WAY = 2
+N_WAY = 5
 K_SHOT = 10
 
+# TODO: implement 1 dataloader for each subject's data to act as the tasks
+
 # Training set
-train_protomaml_sampler = TaskBatchSampler(train_set.targets, 
+train_protomaml_sampler = TaskBatchSampler(train_set.targets,
+                                           train_set.subjects, 
                                            include_query=True,
                                            N_way=N_WAY,
                                            K_shot=K_SHOT,
-                                           batch_size=16)
+                                           batch_size=len(train_set.targets) // len(train_tasks))
+
 train_protomaml_loader = data.DataLoader(train_set, 
                                          batch_sampler=train_protomaml_sampler,
                                          collate_fn=train_protomaml_sampler.get_collate_fn(),
@@ -836,10 +942,11 @@ train_protomaml_loader = data.DataLoader(train_set,
 
 # Validation set
 val_protomaml_sampler = TaskBatchSampler(val_set.targets, 
+                                         val_set.subjects,
                                          include_query=True,
                                          N_way=N_WAY,
                                          K_shot=K_SHOT,
-                                         batch_size=16,  # We do not update the parameters, hence the batch size is irrelevant here
+                                         batch_size=len(val_set.targets) // len(val_tasks),  # We do not update the parameters, hence the batch size is irrelevant here
                                          shuffle=False)
 val_protomaml_loader = data.DataLoader(val_set, 
                                        batch_sampler=val_protomaml_sampler,
@@ -868,33 +975,51 @@ protomaml_model, trainer = train_model(ProtoMAML,
 
 # %%
 def test_protomaml(model, trainer, dataset, n_way, k_shot=4):
-    pl.seed_everything(42)  # To be reproducable
-    
-    # Model
+    pl.seed_everything(42)
     model = model.to(device)
-    
-    # Test set
-    test_protomaml_sampler = TaskBatchSampler(dataset.targets, 
-                                            include_query=True,
-                                            N_way=n_way,
-                                            K_shot=k_shot,
-                                            batch_size=16,  # We do not update the parameters, hence the batch size is irrelevant here
-                                            shuffle=False)
-    test_protomaml_loader = data.DataLoader(dataset, 
-                                        batch_sampler=test_protomaml_sampler,
-                                        collate_fn=test_protomaml_sampler.get_collate_fn(),
-                                        num_workers=32)
+    num_classes = dataset.targets.unique().shape[0]
 
-    results = trainer.test(model, test_protomaml_loader)
+    # Data loader for full test set as query set
+    full_dataloader = data.DataLoader(dataset, batch_size=1, num_workers=32, shuffle=False, drop_last=False)
+    # Data loader for sampling support sets
+    sampler = FewShotBatchSampler(
+        dataset.targets, dataset.subjects, include_query=False, N_way=n_way, K_shot=k_shot, shuffle=False, shuffle_once=False
+    )
+    sample_dataloader = data.DataLoader(dataset, batch_sampler=sampler, num_workers=32)
 
-    return results
+    # We iterate through the full dataset in two manners. First, to select the k-shot batch.
+    # Second, the evaluate the model on all other examples
+    accuracies = []
+    for (support_imgs, support_targets), support_indices in tqdm(
+        zip(sample_dataloader, sampler), "Performing few-shot finetuning"
+    ):
+        support_imgs = support_imgs.to(device)
+        support_targets = support_targets.to(device)
+        # Finetune new model on support set
+        local_model, output_weight, output_bias, classes = model.adapt_few_shot(support_imgs, support_targets)
+        with torch.no_grad():  # No gradients for query set needed
+            local_model.eval()
+            batch_acc = torch.zeros((0,), dtype=torch.float32, device=device)
+            # Evaluate all examples in test dataset
+            for query_imgs, query_targets in full_dataloader:
+                query_imgs = query_imgs.to(device)
+                query_targets = query_targets.to(device)
+                query_labels = (classes[None, :] == query_targets[:, None]).long().argmax(dim=-1)
+                _, _, acc = model.run_model(local_model, output_weight, output_bias, query_imgs, query_labels)
+                batch_acc = torch.cat([batch_acc, acc.detach()], dim=0)
+            # Exclude support set elements
+            for s_idx in support_indices:
+                batch_acc[s_idx] = 0
+            batch_acc = batch_acc.sum().item() / (batch_acc.shape[0] - len(support_indices))
+            accuracies.append(batch_acc)
+    return mean(accuracies), stdev(accuracies)
 
 # %%
 # Reduce inner learning rate for few shot and increase number of inner steps, if necessary, for further 
 # improvement during testing phase
 protomaml_model.hparams.lr_inner = 0.1
 protomaml_model.hparams.lr_output = 0.1
-protomaml_model.hparams.num_inner_steps = 1
+protomaml_model.hparams.num_inner_steps = 10
 
 # %%
 protomaml_result_file = os.path.join(CHECKPOINT_PATH, "protomaml_fewshot.json")
@@ -903,8 +1028,7 @@ protomaml_result_file = os.path.join(CHECKPOINT_PATH, "protomaml_fewshot.json")
 protomaml_accuracies = dict()
 for k in [5, 10, 15]:
     protomaml_accuracies[k] = test_protomaml(protomaml_model, trainer, test_set, n_way=N_WAY, k_shot=k)
-    print(protomaml_accuracies[k])
-    # print(f"Accuracy for k={k}: {100.0*protomaml_accuracies[k][0]:4.2f}% (+-{100.0*protomaml_accuracies[k][1]:4.2f}%)")
+    print(f"Accuracy for k={k}: {100.0*protomaml_accuracies[k][0]:4.2f}% (+-{100.0*protomaml_accuracies[k][1]:4.2f}%)")
 # Export results
 with open(protomaml_result_file, 'w') as f:
     json.dump(protomaml_accuracies, f, indent=4)
